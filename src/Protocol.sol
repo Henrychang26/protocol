@@ -42,6 +42,10 @@ contract Protocol is ReentrancyGuard {
     uint256 private constant LIQUIDATION_THRESHOLD = 50;
     uint256 private constant MIN_HEALTH_FACTOR = 1e18;
     uint256 private constant TRANSACTION_FEE = 1000;
+    uint256 private constant OPTIMAL_RATE = 45e18;
+    uint256 private constant RATE_PRECISION = 100e18;
+    uint256 private constant VARIABLE_RATE_SLOPE1 = 4;
+    
 
     //Events
 
@@ -76,6 +80,9 @@ contract Protocol is ReentrancyGuard {
         nonReentrant
     {
         s_userCollateralBalance[msg.sender][token] += amount;
+
+        //@notice this is to keep track of all collateral available to calculate utilization rate
+        s_userCollateralBalance[address(this)][token] += amount;
 
         emit SuupliedCollateral(msg.sender, token, amount);
         IERC20(token).transferFrom(msg.sender, address(this), amount);
@@ -187,5 +194,24 @@ contract Protocol is ReentrancyGuard {
 
     function getProtocolBalance(address token) private view returns (uint256) {
         return IERC20(token).balanceOf(address(this));
+    }
+
+    function getVariableRate(address token) private view returns(uint256 rate){
+        (uint256 utilizationRate) = getTotalUtilization(token);
+    
+        
+        if(utilizationRate <= OPTIMAL_RATE / RATE_PRECISION){
+            return (utilizationRate/(OPTIMAL_RATE / RATE_PRECISION)) * (VARIABLE_RATE_SLOPE1 /RATE_PRECISION);
+        }
+    }
+
+    //Total utilization = amount lended / total amount available in protocol
+    function getTotalUtilization(address token) private view returns(uint256){
+        uint256 avaialbleCollateral = getProtocolBalance(token);
+        uint256 utilizedCollateral = s_userCollateralBalance[address(this)][token] - avaialbleCollateral;
+        if(utilizedCollateral <= 0){
+            return 0;
+        }
+        return ((utilizedCollateral * 100 ) / s_userCollateralBalance[address(this)][token]);
     }
 }
