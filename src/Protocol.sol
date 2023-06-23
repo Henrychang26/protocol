@@ -22,8 +22,14 @@ contract Protocol is ReentrancyGuard {
     error Protocol__ProtocolDoesNotSupportToken(address token);
     error Protocol__BreaksHealthFactor(uint256 userHealthFactor);
     error Protocol__ProtocolDoesNotHaveEnoughBalance();
+    error Protocol__ProtocolDoesNotHaveCollateral();
 
     using OracleLib for AggregatorV3Interface;
+
+    struct TransactionDetail {
+        uint256 amount;
+        uint256 lastTransactionBlock;
+    }
 
     constructor(address[] memory token, address[] memory priceFeed) {
         if (token.length != priceFeed.length) {
@@ -36,16 +42,17 @@ contract Protocol is ReentrancyGuard {
     }
 
     address[] public s_allowedTokens;
+    TransactionDetail transaction;
 
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant PRECISION = 1e18;
     uint256 private constant LIQUIDATION_THRESHOLD = 50;
     uint256 private constant MIN_HEALTH_FACTOR = 1e18;
     uint256 private constant TRANSACTION_FEE = 1000;
-    uint256 private constant OPTIMAL_RATE = 45e18;
-    uint256 private constant RATE_PRECISION = 100e18;
-    uint256 private constant VARIABLE_RATE_SLOPE1 = 4;
-    
+    uint256 private constant OPTIMAL_RATE = 45 * 1e18;
+    uint256 private constant RATE_PRECISION = 100 * 1e18;
+    uint256 private constant VARIABLE_RATE_SLOPE1 = 4 * 1e18;
+    uint256 private constant VARIABLE_RATE_SLOPE2 = 300 * 1e18;
 
     //Events
 
@@ -56,6 +63,11 @@ contract Protocol is ReentrancyGuard {
     mapping(address user => mapping(address token => uint256 balance)) private s_userCollateralBalance;
     mapping(address user => mapping(address token => uint256 balance)) private s_userBorrowAmount;
     mapping(address token => address priceFeed) private s_priceFeeds;
+    mapping(address user => TransactionDetail) private transactionDetail;
+
+    function updatetrans(address token) external {
+        transactionDetail[msg.sender] = TransactionDetail({amount: 100, lastTransactionBlock: 123213});
+    }
 
     //Modifiers
 
@@ -69,6 +81,13 @@ contract Protocol is ReentrancyGuard {
     modifier validCollateralToken(address token) {
         if (s_priceFeeds[token] == address(0)) {
             revert Protocol__ProtocolDoesNotSupportToken(token);
+        }
+        _;
+    }
+
+    modifier mustHaveCollateral(address token) {
+        if (s_userCollateralBalance[address(this)][token] <= 0) {
+            revert Protocol__ProtocolDoesNotHaveCollateral();
         }
         _;
     }
@@ -98,7 +117,7 @@ contract Protocol is ReentrancyGuard {
 
         s_userBorrowAmount[msg.sender][tokenToBorrow] += amount;
 
-        uint256 transactionFee = amount / TRANSACTION_FEE; 
+        uint256 transactionFee = amount / TRANSACTION_FEE;
 
         s_userCollateralBalance[address(this)][tokenToBorrow] += transactionFee;
 
@@ -121,15 +140,11 @@ contract Protocol is ReentrancyGuard {
         IERC20(token).transfer(msg.sender, amount);
     }
 
-    function repay(address token, uint256 amount) external moreThanZero(amount) nonReentrant{
-
-    }
+    function repay(address token, uint256 amount) external moreThanZero(amount) nonReentrant {}
 
     function repayAndRedeemCollateral() external {}
 
-    function liquidate(address user, uint256 debtToCover) public {
-
-    }
+    function liquidate(address user, uint256 debtToCover) public {}
 
     // function healthFactor(address user) public {
     //     (uint256 totalBorrowAmountInUsd, uint256 collateralValueInUsd) = _getAccountInformation(user);
@@ -196,22 +211,40 @@ contract Protocol is ReentrancyGuard {
         return IERC20(token).balanceOf(address(this));
     }
 
-    function getVariableRate(address token) private view returns(uint256 rate){
+    function getVariableRate(address token) private view returns (uint256 rate) {
         (uint256 utilizationRate) = getTotalUtilization(token);
-    
-        
-        if(utilizationRate <= OPTIMAL_RATE / RATE_PRECISION){
-            return (utilizationRate/(OPTIMAL_RATE / RATE_PRECISION)) * (VARIABLE_RATE_SLOPE1 /RATE_PRECISION);
+
+        if (utilizationRate == 0) {
+            return 0;
         }
+
+        uint256 optimalRate = (OPTIMAL_RATE / RATE_PRECISION) * 1e18;
+
+        if (utilizationRate <= optimalRate) {
+            return (utilizationRate * VARIABLE_RATE_SLOPE1) / optimalRate;
+        }
+
+        return
+            VARIABLE_RATE_SLOPE1 + (utilizationRate - optimalRate) / ((1 - optimalRate) * 1e18) * VARIABLE_RATE_SLOPE2;
     }
 
     //Total utilization = amount lended / total amount available in protocol
-    function getTotalUtilization(address token) private view returns(uint256){
+    function getTotalUtilization(address token) private view mustHaveCollateral(token) returns (uint256) {
         uint256 avaialbleCollateral = getProtocolBalance(token);
         uint256 utilizedCollateral = s_userCollateralBalance[address(this)][token] - avaialbleCollateral;
-        if(utilizedCollateral <= 0){
+        if (utilizedCollateral <= 0) {
             return 0;
         }
-        return ((utilizedCollateral * 100 ) / s_userCollateralBalance[address(this)][token]);
+        // 1000000000000000000 / 100000000000000000000 =
+        return (((utilizedCollateral * 100) / s_userCollateralBalance[address(this)][token])) * 1e18;
+    }
+
+    //@notice 1% fee goes to protocol
+    function getSupplyRate(address token) external view returns (uint256 rate) {
+        uint256 utiilzationRate = getTotalUtilization(token);
+        uint256 variableRate = getVariableRate(token);
+        uint256 reserveFactor = 1 * 1e16;
+
+        return (utiilzationRate / PRECISION) * (variableRate / PRECISION) * (reserveFactor / PRECISION);
     }
 }
